@@ -79,7 +79,7 @@ def _get_token() -> str:
     return token
 
 
-def _api(method: str, path: str, body: Any = None, params: dict | None = None) -> Any:
+def _api(method: str, path: str, body: Any = None, params: dict | list | None = None) -> Any:
     token = _get_token()
     url = f"{BASE_URL}/{path.lstrip('/')}"
     if params:
@@ -221,7 +221,14 @@ def stepik_publish_course(course_id: int) -> str:
 @mcp.tool()
 def stepik_get_sections(course_id: int) -> str:
     """List all sections (modules) in a course."""
-    result = _api("GET", "sections", params={"course": course_id})
+    course_result = _api("GET", f"courses/{course_id}")
+    courses = course_result.get("courses", [])
+    if not courses:
+        return f"Course {course_id} not found."
+    section_ids = courses[0].get("sections", [])
+    if not section_ids:
+        return f"No sections found in course {course_id}."
+    result = _api("GET", "sections", params=[("ids[]", sid) for sid in section_ids])
     sections = result.get("sections", [])
     if not sections:
         return f"No sections found in course {course_id}."
@@ -274,14 +281,21 @@ def stepik_delete_section(section_id: int) -> str:
 @mcp.tool()
 def stepik_get_lessons(section_id: int) -> str:
     """List lessons in a section (via units)."""
-    units_result = _api("GET", "units", params={"section": section_id})
+    section_result = _api("GET", f"sections/{section_id}")
+    sections = section_result.get("sections", [])
+    if not sections:
+        return f"Section {section_id} not found."
+    unit_ids = sections[0].get("units", [])
+    if not unit_ids:
+        return f"No lessons in section {section_id}."
+
+    units_result = _api("GET", "units", params=[("ids[]", uid) for uid in unit_ids])
     units = units_result.get("units", [])
     if not units:
         return f"No lessons in section {section_id}."
 
-    lesson_ids = [u["lesson"] for u in sorted(units, key=lambda x: x.get("position", 0))]
-    ids_param = [("ids[]", lid) for lid in lesson_ids]
-    lessons_result = _api("GET", "lessons", params=dict(ids_param))
+    lesson_ids = [u["lesson"] for u in units]
+    lessons_result = _api("GET", "lessons", params=[("ids[]", lid) for lid in lesson_ids])
     lessons_by_id = {l["id"]: l for l in lessons_result.get("lessons", [])}
 
     lines = []
@@ -592,7 +606,6 @@ def stepik_create_string_step(
                     "use_re": use_re,
                     "match_substring": match_substring,
                     "case_sensitive": case_sensitive,
-                    "is_html_enabled": True,
                     "code": "",
                 },
             },
