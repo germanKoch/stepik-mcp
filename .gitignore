@@ -1,3 +1,4 @@
 .idea
 .venv
 /stepik-api-mcp.iml
+.env

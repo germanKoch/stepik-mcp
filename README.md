@@ -54,35 +54,26 @@ MCP-сервер для управления курсами на [Stepik](https:
 |---|---|
 | `stepik_health_check` | Проверить подключение и авторизацию |
 
-## Установка
-
-```bash
-git clone <repo-url>
-cd stepik-api-mcp
-uv venv && uv pip install -e .
-```
-
 ## Настройка
 
-Создайте OAuth2 приложение на [Stepik](https://stepik.org/oauth2/applications/) (тип: `client_credentials`) и задайте переменные окружения:
+Создайте OAuth2 приложение на [Stepik](https://stepik.org/oauth2/applications/) (тип: `client_credentials`) и получите `client_id` и `client_secret`.
 
-```
-STEPIK_CLIENT_ID=ваш_client_id
-STEPIK_CLIENT_SECRET=ваш_client_secret
-```
+## Подключение
 
-Или создайте файл `.env` рядом с `stepik_mcp_server.py` (требуется `uv pip install python-dotenv`).
+### Через uvx (рекомендуется)
 
-## Подключение к Claude Code
-
-Добавьте в конфигурацию MCP-серверов:
+Не требует клонирования репозитория — `uvx` сам скачает и запустит сервер:
 
 ```json
 {
   "mcpServers": {
     "stepik": {
-      "command": "/path/to/stepik-api-mcp/.venv/bin/python",
-      "args": ["/path/to/stepik-api-mcp/stepik_mcp_server.py"],
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/germanKoch/stepik-api-mcp.git",
+        "stepik-mcp"
+      ],
       "env": {
         "STEPIK_CLIENT_ID": "ваш_client_id",
         "STEPIK_CLIENT_SECRET": "ваш_client_secret"
@@ -92,7 +83,13 @@ STEPIK_CLIENT_SECRET=ваш_client_secret
 }
 ```
 
-Или через entry point:
+### Локальная установка
+
+```bash
+git clone https://github.com/germanKoch/stepik-api-mcp.git
+cd stepik-api-mcp
+uv venv && uv pip install -e .
+```
 
 ```json
 {
