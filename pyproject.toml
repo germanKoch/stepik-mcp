@@ -1,6 +1,12 @@
 [project]
 name = "stepik-api-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Stepik MCP Server — manage courses, sections, lessons, and steps via Stepik API"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["mcp>=1.0.0"]
+
+[project.optional-dependencies]
+dotenv = ["python-dotenv>=1.0"]
+
+[project.scripts]
+stepik-mcp = "stepik_mcp_server:mcp.run"
