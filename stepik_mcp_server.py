@@ -450,12 +450,15 @@ def stepik_create_quiz_step(
     position: int = 1,
     preserve_order: bool = False,
     feedbacks: list[str] | None = None,
+    feedback_correct: str = "",
+    feedback_wrong: str = "",
 ) -> str:
     """
     Create a multiple-choice quiz step.
     correct_indices: 0-based indices of correct answers.
     feedbacks: optional per-choice feedback strings (same length as choices).
-    Example: choices=["A","B","C"], correct_indices=[1], feedbacks=["Wrong because...","Correct!","Wrong because..."]
+    feedback_correct: explanation shown when the student answers correctly.
+    feedback_wrong: explanation shown when the student answers incorrectly.
     """
     if feedbacks and len(feedbacks) != len(choices):
         return f"Error: feedbacks length ({len(feedbacks)}) must match choices length ({len(choices)})."
@@ -475,6 +478,8 @@ def stepik_create_quiz_step(
             "block": {
                 "name": "choice",
                 "text": question,
+                "feedback_correct": feedback_correct,
+                "feedback_wrong": feedback_wrong,
                 "source": {
                     "options": options,
                     "is_always_correct": False,
@@ -500,11 +505,15 @@ def stepik_update_quiz_step(
     correct_indices: list[int] | None = None,
     preserve_order: bool | None = None,
     feedbacks: list[str] | None = None,
+    feedback_correct: str | None = None,
+    feedback_wrong: str | None = None,
 ) -> str:
     """
     Update a choice (quiz) step. Only provided fields are changed.
     If updating choices, correct_indices must also be provided.
     feedbacks: optional per-choice feedback strings (same length as choices).
+    feedback_correct: explanation shown when the student answers correctly.
+    feedback_wrong: explanation shown when the student answers incorrectly.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
@@ -515,6 +524,12 @@ def stepik_update_quiz_step(
 
     if question is not None:
         block["text"] = question
+
+    if feedback_correct is not None:
+        block["feedback_correct"] = feedback_correct
+
+    if feedback_wrong is not None:
+        block["feedback_wrong"] = feedback_wrong
 
     if choices is not None:
         if correct_indices is None:
