@@ -578,6 +578,41 @@ def stepik_create_matching_step(
 
 
 @mcp.tool()
+def stepik_update_matching_step(
+    step_id: int,
+    question: str | None = None,
+    pairs: list[dict[str, str]] | None = None,
+    preserve_firsts_order: bool | None = None,
+) -> str:
+    """
+    Update a matching step. Only provided fields are changed.
+    pairs: list of {"first": "...", "second": "..."} dicts.
+    """
+    existing = _get_step_source(step_id)
+    block = existing.get("block", {})
+    if block.get("name") != "matching":
+        return f"Error: step {step_id} is type '{block.get('name')}', not 'matching'."
+
+    source = block.get("source", {})
+
+    if question is not None:
+        block["text"] = question
+
+    if pairs is not None:
+        source["pairs"] = [{"first": p["first"], "second": p["second"]} for p in pairs]
+
+    if preserve_firsts_order is not None:
+        source["preserve_firsts_order"] = preserve_firsts_order
+
+    block["source"] = source
+
+    body = {"step-source": {"block": block}}
+    result = _api("PUT", f"step-sources/{step_id}", body)
+    s = result["step-sources"][0]
+    return f"Matching step updated: step_id={s['id']}"
+
+
+@mcp.tool()
 def stepik_create_string_step(
     lesson_id: int,
     question: str,
@@ -614,6 +649,46 @@ def stepik_create_string_step(
     result = _api("POST", "step-sources", body)
     s = result["step-sources"][0]
     return f"String step created: step_id={s['id']} in lesson {lesson_id}"
+
+
+@mcp.tool()
+def stepik_reorder_steps(lesson_id: int, step_ids: list[int]) -> str:
+    """
+    Reorder steps in a lesson. step_ids is the full list of step IDs in desired order.
+    All steps of the lesson must be included.
+    Example: stepik_reorder_steps(123, [55, 53, 54]) puts step 55 first, 53 second, 54 third.
+    """
+    result = _api("GET", "steps", params={"lesson": lesson_id})
+    existing_ids = {s["id"] for s in result.get("steps", [])}
+
+    given = set(step_ids)
+    if given != existing_ids:
+        missing = existing_ids - given
+        extra = given - existing_ids
+        parts = []
+        if missing:
+            parts.append(f"missing: {sorted(missing)}")
+        if extra:
+            parts.append(f"unknown: {sorted(extra)}")
+        return f"Error: step_ids don't match lesson steps. {', '.join(parts)}"
+
+    updated = []
+    for pos, sid in enumerate(step_ids, start=1):
+        source = _get_step_source(sid)
+        body = {"step-source": {"position": pos, "block": source["block"]}}
+        _api("PUT", f"step-sources/{sid}", body)
+        updated.append(f"step_id={sid} → pos={pos}")
+
+    return "Steps reordered:\n" + "\n".join(updated)
+
+
+@mcp.tool()
+def stepik_move_step(step_id: int, position: int) -> str:
+    """Move a single step to a new position within its lesson."""
+    source = _get_step_source(step_id)
+    body = {"step-source": {"position": position, "block": source["block"]}}
+    _api("PUT", f"step-sources/{step_id}", body)
+    return f"Step {step_id} moved to position {position}."
 
 
 @mcp.tool()
