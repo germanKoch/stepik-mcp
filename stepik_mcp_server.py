@@ -714,6 +714,99 @@ def stepik_delete_step(step_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Attachments
+# ---------------------------------------------------------------------------
+
+def _upload_file(file_path: str, lesson_id: int | None = None, course_id: int | None = None) -> dict:
+    """Upload a file to Stepik via multipart/form-data."""
+    token = _get_token()
+
+    filename = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_types = {
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "gif": "image/gif", "svg": "image/svg+xml", "webp": "image/webp",
+        "pdf": "application/pdf",
+    }
+    content_type = content_types.get(ext, "application/octet-stream")
+
+    boundary = "----StepikMCPBoundary"
+    parts = []
+
+    parts.append(
+        f"--{boundary}\r\n"
+        f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        f"Content-Type: {content_type}\r\n\r\n"
+    )
+
+    if lesson_id is not None:
+        parts.append(
+            f"\r\n--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"lesson\"\r\n\r\n"
+            f"{lesson_id}\r\n"
+        )
+    elif course_id is not None:
+        parts.append(
+            f"\r\n--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"course\"\r\n\r\n"
+            f"{course_id}\r\n"
+        )
+
+    body = parts[0].encode() + file_data
+    for p in parts[1:]:
+        body += p.encode()
+    body += f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        f"{BASE_URL}/attachments",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} POST attachments: {body_text}") from e
+
+
+@mcp.tool()
+def stepik_upload_image(
+    file_path: str,
+    lesson_id: int | None = None,
+    course_id: int | None = None,
+) -> str:
+    """
+    Upload an image to Stepik and get a URL for use in step HTML.
+    file_path: absolute path to image file on disk.
+    lesson_id or course_id: attach the image to a lesson or course (at least one recommended).
+    Returns the URL to use in <img src="...">.
+    """
+    if not os.path.isfile(file_path):
+        return f"Error: file not found: {file_path}"
+
+    result = _upload_file(file_path, lesson_id=lesson_id, course_id=course_id)
+    attachments = result.get("attachments", [])
+    if not attachments:
+        return "Error: upload succeeded but no attachment returned."
+
+    a = attachments[0]
+    url = f"https://stepik.org{a['file']}"
+    return (
+        f"Image uploaded: {a['name']} ({a['size']} bytes)\n"
+        f"URL: {url}\n"
+        f"Use in HTML: <img src=\"{url}\" alt=\"{a['name']}\">"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
