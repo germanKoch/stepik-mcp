@@ -379,6 +379,27 @@ def _get_step_source(step_id: int) -> dict[str, Any]:
     return sources[0]
 
 
+def _get_step_positions(lesson_id: int) -> list[tuple[int, int]]:
+    """Return list of (step_id, position) sorted by position for a lesson."""
+    result = _api("GET", "steps", params={"lesson": lesson_id})
+    steps = sorted(result.get("steps", []), key=lambda s: s.get("position", 0))
+    return [(s["id"], s["position"]) for s in steps]
+
+
+def _restore_step_order(lesson_id: int, original: list[tuple[int, int]]) -> str | None:
+    """Check if step positions changed after an update and restore if needed."""
+    current = _get_step_positions(lesson_id)
+    if current == original:
+        return None
+    original_ids = {sid for sid, _ in original}
+    for sid, pos in original:
+        if sid in {s for s, _ in current}:
+            source = _get_step_source(sid)
+            body = {"step-source": {"position": pos, "block": source["block"]}}
+            _api("PUT", f"step-sources/{sid}", body)
+    return " (step order was restored)"
+
+
 @mcp.tool()
 def stepik_get_steps(lesson_id: int) -> str:
     """List all steps in a lesson. Returns step IDs (use these for update/delete operations)."""
@@ -428,6 +449,9 @@ def stepik_update_text_step(step_id: int, text_html: str) -> str:
     if block_name != "text":
         return f"Error: step {step_id} is type '{block_name}', not 'text'. Use the appropriate update tool."
 
+    lesson_id = existing.get("lesson")
+    original_order = _get_step_positions(lesson_id) if lesson_id else None
+
     body = {
         "step-source": {
             "block": {
@@ -438,7 +462,13 @@ def stepik_update_text_step(step_id: int, text_html: str) -> str:
     }
     result = _api("PUT", f"step-sources/{step_id}", body)
     s = result["step-sources"][0]
-    return f"Text step updated: step_id={s['id']}"
+    msg = f"Text step updated: step_id={s['id']}"
+
+    if original_order and lesson_id:
+        fix = _restore_step_order(lesson_id, original_order)
+        if fix:
+            msg += fix
+    return msg
 
 
 @mcp.tool()
@@ -520,6 +550,9 @@ def stepik_update_quiz_step(
     if block.get("name") != "choice":
         return f"Error: step {step_id} is type '{block.get('name')}', not 'choice'."
 
+    lesson_id = existing.get("lesson")
+    original_order = _get_step_positions(lesson_id) if lesson_id else None
+
     source = block.get("source", {})
 
     if question is not None:
@@ -556,7 +589,13 @@ def stepik_update_quiz_step(
     body = {"step-source": {"block": block}}
     result = _api("PUT", f"step-sources/{step_id}", body)
     s = result["step-sources"][0]
-    return f"Quiz step updated: step_id={s['id']}"
+    msg = f"Quiz step updated: step_id={s['id']}"
+
+    if original_order and lesson_id:
+        fix = _restore_step_order(lesson_id, original_order)
+        if fix:
+            msg += fix
+    return msg
 
 
 @mcp.tool()
@@ -608,6 +647,9 @@ def stepik_update_matching_step(
     if block.get("name") != "matching":
         return f"Error: step {step_id} is type '{block.get('name')}', not 'matching'."
 
+    lesson_id = existing.get("lesson")
+    original_order = _get_step_positions(lesson_id) if lesson_id else None
+
     source = block.get("source", {})
 
     if question is not None:
@@ -624,7 +666,13 @@ def stepik_update_matching_step(
     body = {"step-source": {"block": block}}
     result = _api("PUT", f"step-sources/{step_id}", body)
     s = result["step-sources"][0]
-    return f"Matching step updated: step_id={s['id']}"
+    msg = f"Matching step updated: step_id={s['id']}"
+
+    if original_order and lesson_id:
+        fix = _restore_step_order(lesson_id, original_order)
+        if fix:
+            msg += fix
+    return msg
 
 
 @mcp.tool()
