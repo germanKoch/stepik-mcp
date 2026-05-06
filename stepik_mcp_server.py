@@ -407,6 +407,17 @@ def stepik_get_steps(lesson_id: int) -> str:
     steps = result.get("steps", [])
     if not steps:
         return f"No steps in lesson {lesson_id}."
+
+    graded_types = {"choice", "matching", "string", "number", "math", "code", "sorting", "fill-blanks"}
+    step_costs: dict[int, int] = {}
+    graded_ids = [s["id"] for s in steps if s.get("block", {}).get("name") in graded_types]
+    for sid in graded_ids:
+        try:
+            source = _get_step_source(sid)
+            step_costs[sid] = source.get("cost", 0)
+        except RuntimeError:
+            pass
+
     lines = []
     for s in sorted(steps, key=lambda x: x.get("position", 0)):
         block = s.get("block", {})
@@ -414,8 +425,10 @@ def stepik_get_steps(lesson_id: int) -> str:
         if block.get("text"):
             plain = block["text"][:80].replace("\n", " ")
             text_preview = f" | preview: {plain}"
+        cost = step_costs.get(s["id"], 0)
+        cost_str = f" cost={cost}" if cost else ""
         lines.append(
-            f"step_id={s['id']} pos={s['position']} type={block.get('name', '?')}{text_preview}"
+            f"step_id={s['id']} pos={s['position']} type={block.get('name', '?')}{cost_str}{text_preview}"
         )
     return "\n".join(lines)
 
@@ -482,6 +495,7 @@ def stepik_create_quiz_step(
     feedbacks: list[str] | None = None,
     feedback_correct: str = "",
     feedback_wrong: str = "",
+    cost: int = 0,
 ) -> str:
     """
     Create a multiple-choice quiz step.
@@ -489,6 +503,7 @@ def stepik_create_quiz_step(
     feedbacks: optional per-choice feedback strings (same length as choices).
     feedback_correct: explanation shown when the student answers correctly.
     feedback_wrong: explanation shown when the student answers incorrectly.
+    cost: score points awarded for correct answer (0 = no score).
     """
     if feedbacks and len(feedbacks) != len(choices):
         return f"Error: feedbacks length ({len(feedbacks)}) must match choices length ({len(choices)})."
@@ -501,30 +516,31 @@ def stepik_create_quiz_step(
             "feedback": feedbacks[i] if feedbacks else "",
         })
 
-    body = {
-        "step-source": {
-            "lesson": lesson_id,
-            "position": position,
-            "block": {
-                "name": "choice",
-                "text": question,
-                "feedback_correct": feedback_correct,
-                "feedback_wrong": feedback_wrong,
-                "source": {
-                    "options": options,
-                    "is_always_correct": False,
-                    "is_html_enabled": True,
-                    "preserve_order": preserve_order,
-                    "is_multiple_choice": len(correct_indices) > 1,
-                    "sample_size": len(choices),
-                    "is_options_feedback": bool(feedbacks),
-                },
+    step_source: dict[str, Any] = {
+        "lesson": lesson_id,
+        "position": position,
+        "block": {
+            "name": "choice",
+            "text": question,
+            "feedback_correct": feedback_correct,
+            "feedback_wrong": feedback_wrong,
+            "source": {
+                "options": options,
+                "is_always_correct": False,
+                "is_html_enabled": True,
+                "preserve_order": preserve_order,
+                "is_multiple_choice": len(correct_indices) > 1,
+                "sample_size": len(choices),
+                "is_options_feedback": bool(feedbacks),
             },
-        }
+        },
     }
-    result = _api("POST", "step-sources", body)
+    if cost:
+        step_source["cost"] = cost
+
+    result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
-    return f"Quiz step created: step_id={s['id']} in lesson {lesson_id}"
+    return f"Quiz step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
 @mcp.tool()
@@ -537,6 +553,7 @@ def stepik_update_quiz_step(
     feedbacks: list[str] | None = None,
     feedback_correct: str | None = None,
     feedback_wrong: str | None = None,
+    cost: int | None = None,
 ) -> str:
     """
     Update a choice (quiz) step. Only provided fields are changed.
@@ -544,6 +561,7 @@ def stepik_update_quiz_step(
     feedbacks: optional per-choice feedback strings (same length as choices).
     feedback_correct: explanation shown when the student answers correctly.
     feedback_wrong: explanation shown when the student answers incorrectly.
+    cost: score points awarded for correct answer.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
@@ -586,8 +604,11 @@ def stepik_update_quiz_step(
 
     block["source"] = source
 
-    body = {"step-source": {"block": block}}
-    result = _api("PUT", f"step-sources/{step_id}", body)
+    step_source: dict[str, Any] = {"block": block}
+    if cost is not None:
+        step_source["cost"] = cost
+
+    result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
     s = result["step-sources"][0]
     msg = f"Quiz step updated: step_id={s['id']}"
 
@@ -605,30 +626,33 @@ def stepik_create_matching_step(
     pairs: list[dict[str, str]],
     position: int = 1,
     preserve_firsts_order: bool = False,
+    cost: int = 0,
 ) -> str:
     """
     Create a matching step (connect pairs).
     pairs: list of {"first": "...", "second": "..."} dicts.
+    cost: score points awarded for correct answer (0 = no score).
     Example: pairs=[{"first":"Python","second":"Snake"},{"first":"Java","second":"Island"}]
     """
-    body = {
-        "step-source": {
-            "lesson": lesson_id,
-            "position": position,
-            "block": {
-                "name": "matching",
-                "text": question,
-                "source": {
-                    "pairs": [{"first": p["first"], "second": p["second"]} for p in pairs],
-                    "preserve_firsts_order": preserve_firsts_order,
-                    "is_html_enabled": True,
-                },
+    step_source: dict[str, Any] = {
+        "lesson": lesson_id,
+        "position": position,
+        "block": {
+            "name": "matching",
+            "text": question,
+            "source": {
+                "pairs": [{"first": p["first"], "second": p["second"]} for p in pairs],
+                "preserve_firsts_order": preserve_firsts_order,
+                "is_html_enabled": True,
             },
-        }
+        },
     }
-    result = _api("POST", "step-sources", body)
+    if cost:
+        step_source["cost"] = cost
+
+    result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
-    return f"Matching step created: step_id={s['id']} in lesson {lesson_id}"
+    return f"Matching step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
 @mcp.tool()
@@ -637,10 +661,12 @@ def stepik_update_matching_step(
     question: str | None = None,
     pairs: list[dict[str, str]] | None = None,
     preserve_firsts_order: bool | None = None,
+    cost: int | None = None,
 ) -> str:
     """
     Update a matching step. Only provided fields are changed.
     pairs: list of {"first": "...", "second": "..."} dicts.
+    cost: score points awarded for correct answer.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
@@ -663,8 +689,11 @@ def stepik_update_matching_step(
 
     block["source"] = source
 
-    body = {"step-source": {"block": block}}
-    result = _api("PUT", f"step-sources/{step_id}", body)
+    step_source: dict[str, Any] = {"block": block}
+    if cost is not None:
+        step_source["cost"] = cost
+
+    result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
     s = result["step-sources"][0]
     msg = f"Matching step updated: step_id={s['id']}"
 
@@ -684,6 +713,7 @@ def stepik_create_string_step(
     use_re: bool = False,
     match_substring: bool = False,
     case_sensitive: bool = True,
+    cost: int = 0,
 ) -> str:
     """
     Create a string-input step (user types a text answer).
@@ -691,27 +721,29 @@ def stepik_create_string_step(
     use_re: treat pattern as a regular expression.
     match_substring: accept if the pattern matches a substring of the answer.
     case_sensitive: whether matching is case-sensitive.
+    cost: score points awarded for correct answer (0 = no score).
     """
-    body = {
-        "step-source": {
-            "lesson": lesson_id,
-            "position": position,
-            "block": {
-                "name": "string",
-                "text": question,
-                "source": {
-                    "pattern": pattern,
-                    "use_re": use_re,
-                    "match_substring": match_substring,
-                    "case_sensitive": case_sensitive,
-                    "code": "",
-                },
+    step_source: dict[str, Any] = {
+        "lesson": lesson_id,
+        "position": position,
+        "block": {
+            "name": "string",
+            "text": question,
+            "source": {
+                "pattern": pattern,
+                "use_re": use_re,
+                "match_substring": match_substring,
+                "case_sensitive": case_sensitive,
+                "code": "",
             },
-        }
+        },
     }
-    result = _api("POST", "step-sources", body)
+    if cost:
+        step_source["cost"] = cost
+
+    result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
-    return f"String step created: step_id={s['id']} in lesson {lesson_id}"
+    return f"String step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
 @mcp.tool()
