@@ -747,6 +747,66 @@ def stepik_create_string_step(
 
 
 @mcp.tool()
+def stepik_update_string_step(
+    step_id: int,
+    question: str | None = None,
+    pattern: str | None = None,
+    use_re: bool | None = None,
+    match_substring: bool | None = None,
+    case_sensitive: bool | None = None,
+    cost: int | None = None,
+) -> str:
+    """
+    Update a string-input step. Only provided fields are changed.
+    pattern: the correct answer (or regex if use_re=True).
+    use_re: treat pattern as a regular expression.
+    match_substring: accept if the pattern matches a substring of the answer.
+    case_sensitive: whether matching is case-sensitive.
+    cost: score points awarded for correct answer.
+    """
+    existing = _get_step_source(step_id)
+    block = existing.get("block", {})
+    if block.get("name") != "string":
+        return f"Error: step {step_id} is type '{block.get('name')}', not 'string'."
+
+    lesson_id = existing.get("lesson")
+    original_order = _get_step_positions(lesson_id) if lesson_id else None
+
+    source = block.get("source", {})
+
+    if question is not None:
+        block["text"] = question
+
+    if pattern is not None:
+        source["pattern"] = pattern
+
+    if use_re is not None:
+        source["use_re"] = use_re
+
+    if match_substring is not None:
+        source["match_substring"] = match_substring
+
+    if case_sensitive is not None:
+        source["case_sensitive"] = case_sensitive
+
+    block["source"] = source
+
+    step_source: dict[str, Any] = {"block": block}
+    if cost is not None:
+        step_source["cost"] = cost
+
+    result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
+    s = result["step-sources"][0]
+    msg = f"String step updated: step_id={s['id']}"
+
+    if original_order and lesson_id:
+        fix = _restore_step_order(lesson_id, original_order)
+        if fix:
+            msg += fix
+    return msg
+
+
+@mcp.tool()
 def stepik_reorder_steps(lesson_id: int, step_ids: list[int]) -> str:
     """
     Reorder steps in a lesson. step_ids is the full list of step IDs in desired order.

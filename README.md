@@ -48,6 +48,7 @@ MCP-сервер для управления курсами на [Stepik](https:
 | `stepik_create_matching_step` | Степ на соответствие (matching) |
 | `stepik_update_matching_step` | Обновить степ на соответствие |
 | `stepik_create_string_step` | Степ с вводом строки (поддержка regex) |
+| `stepik_update_string_step` | Обновить степ с вводом строки |
 | `stepik_reorder_steps` | Переупорядочить все степы в уроке |
 | `stepik_move_step` | Переместить один степ на новую позицию |
 | `stepik_delete_step` | Удалить отдельный степ |
@@ -162,6 +163,14 @@ stepik_create_string_step(
     question="<p>Введите флаг:</p>",
     pattern="CTF{s3cr3t_fl4g}",
     case_sensitive=True
+)
+
+stepik_update_string_step(
+    step_id=789012,
+    question="<p>Введите обновленный флаг:</p>",
+    pattern="CTF{new_fl4g}",
+    case_sensitive=True,
+    cost=1
 )
 ```
 
