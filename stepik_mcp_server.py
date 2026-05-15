@@ -26,6 +26,27 @@ if not CLIENT_ID or not CLIENT_SECRET:
 
 BASE_URL = "https://stepik.org/api"
 TOKEN_URL = "https://stepik.org/oauth2/token/"
+ALLOW_ZERO_COST_TASKS_ENV = "STEPIK_ALLOW_ZERO_COST_TASKS"
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+GRADED_STEP_TYPES = frozenset({"choice", "matching", "string", "number", "math", "code", "sorting", "fill-blanks"})
+
+def _zero_cost_tasks_allowed() -> bool:
+    return os.environ.get(ALLOW_ZERO_COST_TASKS_ENV, "false").strip().lower() in TRUE_ENV_VALUES
+
+
+def _task_cost_instruction() -> str:
+    if _zero_cost_tasks_allowed():
+        return "- Scored task tools require explicit integer cost; cost=0 is currently allowed.\n"
+    return "- Scored task tools require explicit integer cost greater than zero.\n"
+
+
+def _task_cost_description(base: str) -> str:
+    if _zero_cost_tasks_allowed():
+        cost_line = "cost: explicit integer score points awarded for correct answer. cost=0 is currently allowed."
+    else:
+        cost_line = "cost: explicit integer score points awarded for correct answer. Must be greater than zero."
+    return f"{base.rstrip()}\n{cost_line}"
+
 
 mcp = FastMCP(
     "stepik",
@@ -40,6 +61,7 @@ mcp = FastMCP(
         "- Steps are the actual content: text, choice, matching, string, etc.\n"
         "- Use stepik_create_* in order: course → section → lesson → unit → step.\n"
         "- Use stepik_update_* or stepik_delete_step to modify existing content.\n"
+        f"{_task_cost_instruction()}"
         "Note: lesson titles are limited to 64 characters on Stepik."
     ),
 )
@@ -79,7 +101,81 @@ def _get_token() -> str:
     return token
 
 
+def _is_scored_task_block(block: Any) -> bool:
+    return isinstance(block, dict) and block.get("name") in GRADED_STEP_TYPES
+
+
+def _cost_value(cost: Any) -> int | None:
+    if isinstance(cost, bool):
+        return None
+    if isinstance(cost, int):
+        return cost
+    return None
+
+
+def _validated_task_cost(cost: Any, context: str) -> tuple[int | None, str | None]:
+    value = _cost_value(cost)
+    if value is None:
+        return None, f"Error: {context} must include an integer cost."
+    if value < 0:
+        return None, f"Error: {context} cost must not be negative."
+    if value == 0 and not _zero_cost_tasks_allowed():
+        return None, (
+            f"Error: {context} must have cost > 0. Pass cost >= 1, or set "
+            f"{ALLOW_ZERO_COST_TASKS_ENV}=true to intentionally allow zero-point tasks."
+        )
+    return value, None
+
+
+def _step_source_payload_from_existing(
+    source: dict[str, Any],
+    context: str,
+    **fields: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    payload = dict(fields)
+    block = source.get("block", {})
+    payload["block"] = block
+
+    if _is_scored_task_block(block):
+        cost, error = _validated_task_cost(source.get("cost"), context)
+        if error:
+            return None, error
+        payload["cost"] = cost
+
+    return payload, None
+
+
+def _validate_step_source_api_body(method: str, path: str, body: Any) -> None:
+    if method not in {"POST", "PUT", "PATCH"}:
+        return
+    if not path.lstrip("/").startswith("step-sources"):
+        return
+    if not isinstance(body, dict):
+        return
+
+    payloads = []
+    step_source = body.get("step-source")
+    if isinstance(step_source, dict):
+        payloads.append(step_source)
+    step_sources = body.get("step-sources")
+    if isinstance(step_sources, list):
+        payloads.extend(item for item in step_sources if isinstance(item, dict))
+
+    for payload in payloads:
+        block = payload.get("block", {})
+        if not _is_scored_task_block(block):
+            continue
+        _, error = _validated_task_cost(
+            payload.get("cost"),
+            f"{block.get('name', 'graded')} step-source API payload",
+        )
+        if error:
+            raise ValueError(error)
+
+
 def _api(method: str, path: str, body: Any = None, params: dict | list | None = None) -> Any:
+    _validate_step_source_api_body(method, path, body)
+
     token = _get_token()
     url = f"{BASE_URL}/{path.lstrip('/')}"
     if params:
@@ -391,12 +487,20 @@ def _restore_step_order(lesson_id: int, original: list[tuple[int, int]]) -> str 
     current = _get_step_positions(lesson_id)
     if current == original:
         return None
-    original_ids = {sid for sid, _ in original}
+
+    updates = []
+    current_ids = {sid for sid, _ in current}
     for sid, pos in original:
-        if sid in {s for s, _ in current}:
+        if sid in current_ids:
             source = _get_step_source(sid)
-            body = {"step-source": {"position": pos, "block": source["block"]}}
-            _api("PUT", f"step-sources/{sid}", body)
+            payload, error = _step_source_payload_from_existing(source, f"step_id={sid}", position=pos)
+            if error:
+                return f" (step order changed but could not be restored: {error})"
+            updates.append((sid, payload))
+
+    for sid, payload in updates:
+        _api("PUT", f"step-sources/{sid}", {"step-source": payload})
+
     return " (step order was restored)"
 
 
@@ -408,9 +512,8 @@ def stepik_get_steps(lesson_id: int) -> str:
     if not steps:
         return f"No steps in lesson {lesson_id}."
 
-    graded_types = {"choice", "matching", "string", "number", "math", "code", "sorting", "fill-blanks"}
     step_costs: dict[int, int] = {}
-    graded_ids = [s["id"] for s in steps if s.get("block", {}).get("name") in graded_types]
+    graded_ids = [s["id"] for s in steps if _is_scored_task_block(s.get("block", {}))]
     for sid in graded_ids:
         try:
             source = _get_step_source(sid)
@@ -425,8 +528,7 @@ def stepik_get_steps(lesson_id: int) -> str:
         if block.get("text"):
             plain = block["text"][:80].replace("\n", " ")
             text_preview = f" | preview: {plain}"
-        cost = step_costs.get(s["id"], 0)
-        cost_str = f" cost={cost}" if cost else ""
+        cost_str = f" cost={step_costs[s['id']]}" if s["id"] in step_costs else ""
         lines.append(
             f"step_id={s['id']} pos={s['position']} type={block.get('name', '?')}{cost_str}{text_preview}"
         )
@@ -484,18 +586,26 @@ def stepik_update_text_step(step_id: int, text_html: str) -> str:
     return msg
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Create a multiple-choice quiz step.
+    correct_indices: 0-based indices of correct answers.
+    feedbacks: optional per-choice feedback strings (same length as choices).
+    feedback_correct: explanation shown when the student answers correctly.
+    feedback_wrong: explanation shown when the student answers incorrectly.
+    """
+))
 def stepik_create_quiz_step(
     lesson_id: int,
     question: str,
     choices: list[str],
     correct_indices: list[int],
+    cost: int,
     position: int = 1,
     preserve_order: bool = False,
     feedbacks: list[str] | None = None,
     feedback_correct: str = "",
     feedback_wrong: str = "",
-    cost: int = 0,
 ) -> str:
     """
     Create a multiple-choice quiz step.
@@ -503,8 +613,12 @@ def stepik_create_quiz_step(
     feedbacks: optional per-choice feedback strings (same length as choices).
     feedback_correct: explanation shown when the student answers correctly.
     feedback_wrong: explanation shown when the student answers incorrectly.
-    cost: score points awarded for correct answer (0 = no score).
+    cost: explicit score points awarded for correct answer.
     """
+    cost_value, cost_error = _validated_task_cost(cost, "Quiz step")
+    if cost_error:
+        return cost_error
+
     if feedbacks and len(feedbacks) != len(choices):
         return f"Error: feedbacks length ({len(feedbacks)}) must match choices length ({len(choices)})."
 
@@ -534,18 +648,26 @@ def stepik_create_quiz_step(
                 "is_options_feedback": bool(feedbacks),
             },
         },
+        "cost": cost_value,
     }
-    if cost:
-        step_source["cost"] = cost
 
     result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
     return f"Quiz step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Update a choice (quiz) step. Only provided fields are changed.
+    If updating choices, correct_indices must also be provided.
+    feedbacks: optional per-choice feedback strings (same length as choices).
+    feedback_correct: explanation shown when the student answers correctly.
+    feedback_wrong: explanation shown when the student answers incorrectly.
+    """
+))
 def stepik_update_quiz_step(
     step_id: int,
+    cost: int,
     question: str | None = None,
     choices: list[str] | None = None,
     correct_indices: list[int] | None = None,
@@ -553,7 +675,6 @@ def stepik_update_quiz_step(
     feedbacks: list[str] | None = None,
     feedback_correct: str | None = None,
     feedback_wrong: str | None = None,
-    cost: int | None = None,
 ) -> str:
     """
     Update a choice (quiz) step. Only provided fields are changed.
@@ -561,12 +682,16 @@ def stepik_update_quiz_step(
     feedbacks: optional per-choice feedback strings (same length as choices).
     feedback_correct: explanation shown when the student answers correctly.
     feedback_wrong: explanation shown when the student answers incorrectly.
-    cost: score points awarded for correct answer.
+    cost: explicit score points awarded for correct answer.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
     if block.get("name") != "choice":
         return f"Error: step {step_id} is type '{block.get('name')}', not 'choice'."
+
+    cost_value, cost_error = _validated_task_cost(cost, "Quiz step")
+    if cost_error:
+        return cost_error
 
     lesson_id = existing.get("lesson")
     original_order = _get_step_positions(lesson_id) if lesson_id else None
@@ -604,9 +729,7 @@ def stepik_update_quiz_step(
 
     block["source"] = source
 
-    step_source: dict[str, Any] = {"block": block}
-    if cost is not None:
-        step_source["cost"] = cost
+    step_source: dict[str, Any] = {"block": block, "cost": cost_value}
 
     result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
     s = result["step-sources"][0]
@@ -619,21 +742,31 @@ def stepik_update_quiz_step(
     return msg
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Create a matching step (connect pairs).
+    pairs: list of {"first": "...", "second": "..."} dicts.
+    Example: pairs=[{"first":"Python","second":"Snake"},{"first":"Java","second":"Island"}]
+    """
+))
 def stepik_create_matching_step(
     lesson_id: int,
     question: str,
     pairs: list[dict[str, str]],
+    cost: int,
     position: int = 1,
     preserve_firsts_order: bool = False,
-    cost: int = 0,
 ) -> str:
     """
     Create a matching step (connect pairs).
     pairs: list of {"first": "...", "second": "..."} dicts.
-    cost: score points awarded for correct answer (0 = no score).
+    cost: explicit score points awarded for correct answer.
     Example: pairs=[{"first":"Python","second":"Snake"},{"first":"Java","second":"Island"}]
     """
+    cost_value, cost_error = _validated_task_cost(cost, "Matching step")
+    if cost_error:
+        return cost_error
+
     step_source: dict[str, Any] = {
         "lesson": lesson_id,
         "position": position,
@@ -646,32 +779,40 @@ def stepik_create_matching_step(
                 "is_html_enabled": True,
             },
         },
+        "cost": cost_value,
     }
-    if cost:
-        step_source["cost"] = cost
 
     result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
     return f"Matching step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Update a matching step. Only provided fields are changed.
+    pairs: list of {"first": "...", "second": "..."} dicts.
+    """
+))
 def stepik_update_matching_step(
     step_id: int,
+    cost: int,
     question: str | None = None,
     pairs: list[dict[str, str]] | None = None,
     preserve_firsts_order: bool | None = None,
-    cost: int | None = None,
 ) -> str:
     """
     Update a matching step. Only provided fields are changed.
     pairs: list of {"first": "...", "second": "..."} dicts.
-    cost: score points awarded for correct answer.
+    cost: explicit score points awarded for correct answer.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
     if block.get("name") != "matching":
         return f"Error: step {step_id} is type '{block.get('name')}', not 'matching'."
+
+    cost_value, cost_error = _validated_task_cost(cost, "Matching step")
+    if cost_error:
+        return cost_error
 
     lesson_id = existing.get("lesson")
     original_order = _get_step_positions(lesson_id) if lesson_id else None
@@ -689,9 +830,7 @@ def stepik_update_matching_step(
 
     block["source"] = source
 
-    step_source: dict[str, Any] = {"block": block}
-    if cost is not None:
-        step_source["cost"] = cost
+    step_source: dict[str, Any] = {"block": block, "cost": cost_value}
 
     result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
     s = result["step-sources"][0]
@@ -704,16 +843,24 @@ def stepik_update_matching_step(
     return msg
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Create a string-input step (user types a text answer).
+    pattern: the correct answer (or regex if use_re=True).
+    use_re: treat pattern as a regular expression.
+    match_substring: accept if the pattern matches a substring of the answer.
+    case_sensitive: whether matching is case-sensitive.
+    """
+))
 def stepik_create_string_step(
     lesson_id: int,
     question: str,
     pattern: str,
+    cost: int,
     position: int = 1,
     use_re: bool = False,
     match_substring: bool = False,
     case_sensitive: bool = True,
-    cost: int = 0,
 ) -> str:
     """
     Create a string-input step (user types a text answer).
@@ -721,8 +868,12 @@ def stepik_create_string_step(
     use_re: treat pattern as a regular expression.
     match_substring: accept if the pattern matches a substring of the answer.
     case_sensitive: whether matching is case-sensitive.
-    cost: score points awarded for correct answer (0 = no score).
+    cost: explicit score points awarded for correct answer.
     """
+    cost_value, cost_error = _validated_task_cost(cost, "String step")
+    if cost_error:
+        return cost_error
+
     step_source: dict[str, Any] = {
         "lesson": lesson_id,
         "position": position,
@@ -737,24 +888,31 @@ def stepik_create_string_step(
                 "code": "",
             },
         },
+        "cost": cost_value,
     }
-    if cost:
-        step_source["cost"] = cost
 
     result = _api("POST", "step-sources", {"step-source": step_source})
     s = result["step-sources"][0]
     return f"String step created: step_id={s['id']} in lesson {lesson_id} (cost={s.get('cost', 0)})"
 
 
-@mcp.tool()
+@mcp.tool(description=_task_cost_description(
+    """
+    Update a string-input step. Only provided fields are changed.
+    pattern: the correct answer (or regex if use_re=True).
+    use_re: treat pattern as a regular expression.
+    match_substring: accept if the pattern matches a substring of the answer.
+    case_sensitive: whether matching is case-sensitive.
+    """
+))
 def stepik_update_string_step(
     step_id: int,
+    cost: int,
     question: str | None = None,
     pattern: str | None = None,
     use_re: bool | None = None,
     match_substring: bool | None = None,
     case_sensitive: bool | None = None,
-    cost: int | None = None,
 ) -> str:
     """
     Update a string-input step. Only provided fields are changed.
@@ -762,12 +920,16 @@ def stepik_update_string_step(
     use_re: treat pattern as a regular expression.
     match_substring: accept if the pattern matches a substring of the answer.
     case_sensitive: whether matching is case-sensitive.
-    cost: score points awarded for correct answer.
+    cost: explicit score points awarded for correct answer.
     """
     existing = _get_step_source(step_id)
     block = existing.get("block", {})
     if block.get("name") != "string":
         return f"Error: step {step_id} is type '{block.get('name')}', not 'string'."
+
+    cost_value, cost_error = _validated_task_cost(cost, "String step")
+    if cost_error:
+        return cost_error
 
     lesson_id = existing.get("lesson")
     original_order = _get_step_positions(lesson_id) if lesson_id else None
@@ -791,9 +953,7 @@ def stepik_update_string_step(
 
     block["source"] = source
 
-    step_source: dict[str, Any] = {"block": block}
-    if cost is not None:
-        step_source["cost"] = cost
+    step_source: dict[str, Any] = {"block": block, "cost": cost_value}
 
     result = _api("PUT", f"step-sources/{step_id}", {"step-source": step_source})
     s = result["step-sources"][0]
@@ -827,11 +987,17 @@ def stepik_reorder_steps(lesson_id: int, step_ids: list[int]) -> str:
             parts.append(f"unknown: {sorted(extra)}")
         return f"Error: step_ids don't match lesson steps. {', '.join(parts)}"
 
-    updated = []
+    updates = []
     for pos, sid in enumerate(step_ids, start=1):
         source = _get_step_source(sid)
-        body = {"step-source": {"position": pos, "block": source["block"]}}
-        _api("PUT", f"step-sources/{sid}", body)
+        payload, error = _step_source_payload_from_existing(source, f"step_id={sid}", position=pos)
+        if error:
+            return error
+        updates.append((sid, pos, payload))
+
+    updated = []
+    for sid, pos, payload in updates:
+        _api("PUT", f"step-sources/{sid}", {"step-source": payload})
         updated.append(f"step_id={sid} → pos={pos}")
 
     return "Steps reordered:\n" + "\n".join(updated)
@@ -841,8 +1007,10 @@ def stepik_reorder_steps(lesson_id: int, step_ids: list[int]) -> str:
 def stepik_move_step(step_id: int, position: int) -> str:
     """Move a single step to a new position within its lesson."""
     source = _get_step_source(step_id)
-    body = {"step-source": {"position": position, "block": source["block"]}}
-    _api("PUT", f"step-sources/{step_id}", body)
+    payload, error = _step_source_payload_from_existing(source, f"step_id={step_id}", position=position)
+    if error:
+        return error
+    _api("PUT", f"step-sources/{step_id}", {"step-source": payload})
     return f"Step {step_id} moved to position {position}."
 
 

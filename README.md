@@ -85,7 +85,8 @@ MCP-сервер для управления курсами на [Stepik](https:
       ],
       "env": {
         "STEPIK_CLIENT_ID": "ваш_client_id",
-        "STEPIK_CLIENT_SECRET": "ваш_client_secret"
+        "STEPIK_CLIENT_SECRET": "ваш_client_secret",
+        "STEPIK_ALLOW_ZERO_COST_TASKS": "false"
       }
     }
   }
@@ -107,12 +108,32 @@ uv venv && uv pip install -e .
       "command": "/path/to/stepik-api-mcp/.venv/bin/stepik-mcp",
       "env": {
         "STEPIK_CLIENT_ID": "ваш_client_id",
-        "STEPIK_CLIENT_SECRET": "ваш_client_secret"
+        "STEPIK_CLIENT_SECRET": "ваш_client_secret",
+        "STEPIK_ALLOW_ZERO_COST_TASKS": "false"
       }
     }
   }
 }
 ```
+
+## Баллы за задания
+
+Проверяемые задания (`choice`, `matching`, `string` и другие graded step types Stepik)
+требуют явно переданный `cost` в create/update инструментах. MCP не подставляет
+баллы по умолчанию.
+
+MCP дополнительно проверяет исходящие `step-sources`: для проверяемого задания
+`cost` должен быть явно заданным целым числом больше нуля.
+
+Нулевые задания можно разрешить только явно:
+
+```json
+{
+  "STEPIK_ALLOW_ZERO_COST_TASKS": "true"
+}
+```
+
+Без этой переменной `cost=0` будет отклонен.
 
 ## Примеры использования
 
@@ -137,7 +158,8 @@ stepik_create_quiz_step(
         "dict — это словарь"
     ],
     feedback_correct="Правильно! str (string) — встроенный тип для текстовых данных.",
-    feedback_wrong="Неверно. Перечитайте раздел о базовых типах данных."
+    feedback_wrong="Неверно. Перечитайте раздел о базовых типах данных.",
+    cost=1
 )
 ```
 
@@ -151,7 +173,8 @@ stepik_create_matching_step(
         {"first": "Python", "second": "Гвидо ван Россум"},
         {"first": "C++", "second": "Бьярне Страуструп"},
         {"first": "Java", "second": "Джеймс Гослинг"}
-    ]
+    ],
+    cost=1
 )
 ```
 
@@ -162,7 +185,8 @@ stepik_create_string_step(
     lesson_id=123456,
     question="<p>Введите флаг:</p>",
     pattern="CTF{s3cr3t_fl4g}",
-    case_sensitive=True
+    case_sensitive=True,
+    cost=1
 )
 
 stepik_update_string_step(
